@@ -37,8 +37,8 @@ def load_run(run_dir):
             params = json.load(fp)
     with open(os.path.join(run_dir, 'episodes.pkl'), 'rb') as f: 
         episode_buffer = pickle.load(f)
-    PFC_model = keras.models.load_model(os.path.join(run_dir, 'PFC_model'))
-    Str_model = keras.models.load_model(os.path.join(run_dir, 'Str_model'))
+    PFC_model = keras.models.load_model(os.path.join(run_dir, 'PFC_model.h5'))
+    Str_model = keras.models.load_model(os.path.join(run_dir, 'Str_model.h5'))
     task = ts.Two_step(good_prob=params['good_prob'], block_len=params['block_len'])
     return Run_data(params, episode_buffer, PFC_model, Str_model, task)
 
@@ -125,8 +125,8 @@ def plot_performance(episode_buffer, task, fig_no=1):
     plt.ylabel('Bias')
     plt.xlabel('Episode #')
     plt.xlim(0,len(episode_buffer))
-    plt.show()
-    
+    plt.pause(3)
+
 #%% Stay probability analysis -------------------------------------------------
 
 def stay_probability_analysis(experiment_data, last_n=10, fig_no=1, save_dir=None):

@@ -193,16 +193,28 @@ def run_simulation(save_dir=None, pm=default_params):
         print(f'Episode: {e} Steps: {step_n} Trials: {n_trials} '
               f' Rew. per tr.: {np.sum(rewards)/n_trials :.2f} PFC tr. loss: {tl :.3f}')
         
-        if e % 10 == 9: an.plot_performance(episode_buffer, task)
+        if e % 50 == 49: an.plot_performance(episode_buffer, task)
         
     # Save data.    
-    
+
     if save_dir:
         if not os.path.exists(save_dir):
             os.mkdir(save_dir)
-        with open(os.path.join(save_dir,'params.json'), 'w') as fp:
+        with open(os.path.join(save_dir, 'params.json'), 'w') as fp:
             json.dump(pm, fp, indent=4)
-        with open(os.path.join(save_dir, 'episodes.pkl'), 'wb') as fe: 
+        with open(os.path.join(save_dir, 'episodes.pkl'), 'wb') as fe:
             pickle.dump(episode_buffer, fe)
-        PFC_model.save(os.path.join(save_dir, 'PFC_model'))
-        Str_model.save(os.path.join(save_dir, 'Str_model'))
+
+        # Save models with custom objects (if any) properly referenced.
+        PFC_model.save(os.path.join(save_dir, 'PFC_model.h5'))
+        Str_model.save(os.path.join(save_dir, 'Str_model.h5'))
+
+    # if save_dir:
+    #     if not os.path.exists(save_dir):
+    #         os.mkdir(save_dir)
+    #     with open(os.path.join(save_dir,'params.json'), 'w') as fp:
+    #         json.dump(pm, fp, indent=4)
+    #     with open(os.path.join(save_dir, 'episodes.pkl'), 'wb') as fe:
+    #         pickle.dump(episode_buffer, fe)
+    #     PFC_model.save(os.path.join(save_dir, 'PFC_model'))
+    #     Str_model.save(os.path.join(save_dir, 'Str_model'))
