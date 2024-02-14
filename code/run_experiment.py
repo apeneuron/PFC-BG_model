@@ -50,5 +50,5 @@ def analyse_experiments():
 
 # Run file to run experiments then analyse the data.
 if __name__=='__main__':
-    run_experiments(n_runs=6)
+    run_experiments(n_runs=1)
     analyse_experiments()

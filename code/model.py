@@ -12,26 +12,27 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from collections import namedtuple
 
-import two_step_task as ts
+import two_step_task_miller as ts
 import analysis as an
 
 one_hot = keras.utils.to_categorical
 sse_loss = keras.losses.MeanSquaredError(reduction=tf.keras.losses.Reduction.SUM)
 
-Episode = namedtuple('Episode', ['states', 'rewards', 'actions', 'pfc_inputs', 'pfc_states', 'pred_states','task_rew_states', 'n_trials'])
+Episode = namedtuple('Episode', ['states', 'rewards', 'actions', 'pfc_inputs', 'pfc_states', 'pred_states','task_rew_states',
+                                 'trial_idx', 'block_idx', 'trial_idx_within_block', 'n_trials'])
 
 #%% Parameters.
 
 default_params = {
     # Simulation params.
     'n_episodes'  : 500,
-    'episode_len' : 100,  # Episode length in trials.
-    'max_step_per_episode' : 600,
+    'episode_len' : 200,  # Episode length in trials.
+    'max_step_per_episode' : 1200,
     'gamma' : 0.9,        # Discount rate
 
     #Task params.
+    'common_prob' : 0.8,
     'good_prob' : 0.8,
-    'block_len' : [20,40],
 
     # PFC model params.
     'n_back': 30, # Length of history provided as input.
@@ -51,7 +52,7 @@ def run_simulation(save_dir=None, pm=default_params):
     np.random.seed(int.from_bytes(os.urandom(4), 'little'))
 
     #Instantiate task.
-    task = ts.Two_step(good_prob=pm['good_prob'], block_len=pm['block_len'])
+    task = ts.Two_step(common_prob=pm['common_prob'], good_prob=pm['good_prob'])
     
     # PFC model.
     
@@ -110,6 +111,10 @@ def run_simulation(save_dir=None, pm=default_params):
         pfc_states.append(pfc_s)
         values.append(V)
         task_rew_states.append(task.A_good)
+        trial_index.append(task.trial_n)
+        block_index.append(task.block_n)
+        trial_index_within_block.append(task.block_trial)
+
         
     # Run model.
     
@@ -132,6 +137,9 @@ def run_simulation(save_dir=None, pm=default_params):
         pfc_states = []    # (1,n_pfc)
         values = []        # float
         task_rew_states = [] # bool
+        trial_index = []
+        block_index = []
+        trial_index_within_block = []
            
         while True:
             step_n += 1
@@ -159,7 +167,8 @@ def run_simulation(save_dir=None, pm=default_params):
         
         pred_states = np.argmax(PFC_model(get_masked_PFC_inputs(pfc_inputs)),1) # Used only for analysis.
         episode_buffer.append(Episode(np.array(states), np.array(rewards), np.array(actions), np.array(pfc_inputs),
-                               np.vstack(pfc_states), np.array(pred_states), np.array(task_rew_states), n_trials))
+                               np.vstack(pfc_states), np.array(pred_states), np.array(task_rew_states),
+                               np.array(trial_index), np.array(block_index), np.array(trial_index_within_block), n_trials))
         
         # Update striatum weights using advantage actor critic (A2C), Mnih et al. PMLR 48:1928-1937, 2016
         

@@ -19,10 +19,24 @@ from sklearn.decomposition import PCA
 from tensorflow import keras
 from collections import namedtuple
 
-import two_step_task as ts
+import two_step_task_miller as ts
 
 plt.rcParams['pdf.fonttype'] = 42
 plt.rc("axes.spines", top=False, right=False)
+
+# State and action IDs
+initiate = 0
+sec_step_A = 1
+sec_step_B = 2
+
+#Action IDs
+choose_A = 3
+choose_B = 4
+
+#State IDs
+choice = 3
+reward_A = 4
+reward_B = 5
 
 one_hot = keras.utils.to_categorical
 sse_loss = keras.losses.MeanSquaredError(reduction=tf.keras.losses.Reduction.SUM)
@@ -39,10 +53,10 @@ def load_run(run_dir):
         episode_buffer = pickle.load(f)
     PFC_model = keras.models.load_model(os.path.join(run_dir, 'PFC_model.h5'))
     Str_model = keras.models.load_model(os.path.join(run_dir, 'Str_model.h5'))
-    task = ts.Two_step(good_prob=params['good_prob'], block_len=params['block_len'])
+    task = ts.Two_step(good_prob=params['good_prob'], common_prob=params['common_prob'])
     return Run_data(params, episode_buffer, PFC_model, Str_model, task)
 
-def load_experiment(exp_dir, good_only=True):
+def load_experiment(exp_dir, good_only=False): #True):
     '''Load data from an experiment comprising multiple simulation runs, if good_only
     is True then only runs for which the reward rate in the last 10 episodes is
    significantly higher than 0.5 are returned.'''
@@ -51,6 +65,7 @@ def load_experiment(exp_dir, good_only=True):
     if good_only:
         experiment_data = [run_data for run_data in experiment_data 
                            if ave_reward_rate(run_data, return_p_value=True) < 0.05]
+    [compute_stable_period(run_data) for run_data in experiment_data]
     return experiment_data
 
 def ave_reward_rate(run_data, last_n=10, return_p_value=False):
@@ -64,6 +79,37 @@ def ave_reward_rate(run_data, last_n=10, return_p_value=False):
         return proportions_ztest(n_rewards,n_trials,0.5,'larger')[1]
     return n_rewards/n_trials
 
+def compute_stable_period(run_data, last_n=10):
+    vbc = np.array([])
+    vtc = np.array([])
+
+    for ep in run_data.episode_buffer[-last_n:]:
+        positive = 4-ep.task_rew_states
+        better = (ep.actions == positive)
+        at_choice = (ep.states == choice)
+
+        action_at_choice = ep.actions[at_choice]
+        t_at_choice = ep.trial_idx_within_block[at_choice]
+        better_at_choice = better[at_choice]
+
+        valid_action_at_choice = (action_at_choice == choose_A) | (action_at_choice == choose_B)
+        valid_t_at_choice = t_at_choice[valid_action_at_choice]
+        valid_better_at_choice = better_at_choice[valid_action_at_choice]
+
+        vbc = np.concatenate((vbc,valid_better_at_choice))
+        vtc = np.concatenate((vtc,valid_t_at_choice))
+
+    stay = (vbc[1:]==vbc[:-1])
+    positive_stay = stay & (vbc[1:]==1)
+    negative_stay = stay & (vbc[1:]==0)
+    trial_index = vtc[1:]
+
+    pd_positive_stay = pd.DataFrame({'x': trial_index, 'y': positive_stay})
+    pd_negative_stay = pd.DataFrame({'x': trial_index, 'y': negative_stay})
+    prop_positive_stay = pd_positive_stay.groupby('x')['y'].mean()
+    prop_negative_stay = pd_negative_stay.groupby('x')['y'].mean()
+
+
 #%% Plot experiment
     
 def plot_experiment(experiment_data, last_n=10, save_dir=None):
@@ -73,7 +119,8 @@ def plot_experiment(experiment_data, last_n=10, save_dir=None):
     if save_dir and not os.path.exists(save_dir):
         os.mkdir(save_dir)
         with open(os.path.join(save_dir,'params.txt'), 'w') as f:
-            json.dump(experiment_data[0].params, f, indent=4)    
+            json.dump(experiment_data[0].params, f, indent=4)
+
     stay_probability_analysis(experiment_data, last_n, fig_no=1, save_dir=save_dir)
     second_step_value_update_analysis(experiment_data, last_n, fig_no=2, save_dir=save_dir)
     plot_PFC_choice_state_activity(experiment_data, fig_no=3, save_dir=save_dir)
