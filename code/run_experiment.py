@@ -2,6 +2,7 @@
 # © Thomas Akam, 2023, released under the GPLv3 licence.
 
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from concurrent.futures import ProcessPoolExecutor
 
 import analysis as an
@@ -38,17 +39,18 @@ def analyse_experiment(exp_name):
     generated figures to plots directory.'''
     data_dir = os.path.join('..','data',exp_name)
     save_dir = os.path.join('..','plots',exp_name)
-    experiment_data = an.load_experiment(data_dir)
-    an.plot_experiment(experiment_data, save_dir=save_dir)
+    an.convert_experiment_MAT(data_dir)
+    # experiment_data = an.load_experiment(data_dir)
+    # an.plot_experiment(experiment_data, save_dir=save_dir)
     
 def analyse_experiments():
     # Analyse experiment with default parameters.
     analyse_experiment('experiment_def')
     # Analyse experiment where PFC state input is gated by reward.
-    analyse_experiment('experiment_pro')
+    # analyse_experiment('experiment_pro')
     
 
 # Run file to run experiments then analyse the data.
 if __name__=='__main__':
-    run_experiments(n_runs=6)
+    run_experiments(n_runs=16, n_processes=8)
     analyse_experiments()

@@ -18,8 +18,9 @@ from statsmodels.stats.proportion import proportions_ztest
 from sklearn.decomposition import PCA
 from tensorflow import keras
 from collections import namedtuple
-
-import two_step_task as ts
+from scipy.optimize import curve_fit
+from scipy.io import savemat
+import two_step_task_miller as ts
 
 plt.rcParams['pdf.fonttype'] = 42
 plt.rc("axes.spines", top=False, right=False)
@@ -39,19 +40,88 @@ def load_run(run_dir):
         episode_buffer = pickle.load(f)
     PFC_model = keras.models.load_model(os.path.join(run_dir, 'PFC_model.h5'))
     Str_model = keras.models.load_model(os.path.join(run_dir, 'Str_model.h5'))
-    task = ts.Two_step(good_prob=params['good_prob'], block_len=params['block_len'])
+    task = ts.Two_step(good_prob=params['good_prob'], common_prob=params['common_prob'])
     return Run_data(params, episode_buffer, PFC_model, Str_model, task)
+
+def load_test_run(run_dir):
+    '''Load data from a single simulation run.'''
+    with open(os.path.join(run_dir,'test','params.json'), 'r') as fp:
+            params = json.load(fp)
+    with open(os.path.join(run_dir,'test','episodes.pkl'), 'rb') as f:
+        episode_buffer = pickle.load(f)
+    PFC_model = keras.models.load_model(os.path.join(run_dir, 'PFC_model.h5'))
+    Str_model = keras.models.load_model(os.path.join(run_dir, 'Str_model.h5'))
+    task = ts.Two_step(good_prob=params['good_prob'], common_prob=params['common_prob'])
+    return Run_data(params, episode_buffer, PFC_model, Str_model, task)
+
+def convert_experiment_MAT(exp_dir):
+    run_dirs = os.listdir(exp_dir)
+    for run_dir in run_dirs:
+        convert_to_MAT(os.path.join(exp_dir, run_dir))
 
 def load_experiment(exp_dir, good_only=True):
     '''Load data from an experiment comprising multiple simulation runs, if good_only
     is True then only runs for which the reward rate in the last 10 episodes is
    significantly higher than 0.5 are returned.'''
+    convert_experiment_MAT(exp_dir)
     run_dirs = os.listdir(exp_dir)
     experiment_data = [load_run(os.path.join(exp_dir, run_dir)) for run_dir in run_dirs]
+
     if good_only:
         experiment_data = [run_data for run_data in experiment_data 
                            if ave_reward_rate(run_data, return_p_value=True) < 0.05]
     return experiment_data
+
+def convert_to_MAT(run_dir, last_n=10):
+    # Initialize arrays
+    common_run = np.array([])
+    reward_run = np.array([])
+    better_run = np.array([])
+    action_run = np.array([])
+    ctxt_run = np.array([])
+    time_run = np.array([])
+
+    run_data = load_test_run(run_dir)
+
+    # Extract data from the last_n episodes
+    for ep in run_data.episode_buffer[-last_n:]:
+        action, _, common, reward, choice_idx, _, _ = _get_CSTO(ep, return_inds=True)
+        ctxt = ep.task_rew_states[choice_idx]
+        better = (action == ctxt)
+        time = ep.trial_idx_within_block[choice_idx]
+
+        common_run = np.concatenate((common_run, common))
+        reward_run = np.concatenate((reward_run, reward))
+        better_run = np.concatenate((better_run, better))
+        action_run = np.concatenate((action_run, action))
+        ctxt_run = np.concatenate((ctxt_run, ctxt))
+        time_run = np.concatenate((time_run, time))
+
+    # Structuring data for a MATLAB struct
+    # The outer dictionary represents the .mat file content
+    # The 'struct_name' key holds a dictionary for the MATLAB struct
+    # Each entry in the 'struct_name' dictionary represents a field (property) of the MATLAB struct
+    matlab_struct = {
+        'data': {
+            'cong': 1,
+            'common': common_run.reshape(-1, 1),
+            'reward': reward_run.reshape(-1, 1),
+            'better': better_run.reshape(-1, 1),
+            'action': action_run.reshape(-1, 1),
+            'ctxt': ctxt_run.reshape(-1, 1),
+            'time': time_run.reshape(-1, 1)
+        }
+    }
+
+    # To comply with MATLAB struct array requirements, wrap the inner dictionary with a list
+    # This indicates a single struct, which is required by MATLAB's format
+    matlab_data = {key: [value] for key, value in matlab_struct.items()}
+
+    # Construct the full path to save the .mat file
+    full_path = os.path.join(run_dir, 'test', 'dataset.mat')
+
+    # Save the structured data as a MATLAB file
+    savemat(full_path, matlab_data)
 
 def ave_reward_rate(run_data, last_n=10, return_p_value=False):
     '''Compute the average reward rate over the last_n episodes of a run and 
@@ -64,6 +134,159 @@ def ave_reward_rate(run_data, last_n=10, return_p_value=False):
         return proportions_ztest(n_rewards,n_trials,0.5,'larger')[1]
     return n_rewards/n_trials
 
+# Define the model function for curve fitting
+def model_func(t, A, B, C, D):
+    return A * np.exp(-B * t) + C * t + D
+
+# Function for curve fitting with initial guesses and bounds
+def fit_curve(x_data, y_data, initial_guesses, parameter_bounds):
+    popt, _ = curve_fit(model_func, x_data, y_data, p0=initial_guesses, bounds=parameter_bounds, maxfev=10000)
+    return popt
+
+# Modified function for plotting fitted curve and original data with matching colors
+def plot_data_and_fit(x_data, y_data, popt, label_prefix, color):
+    fitted_y = model_func(x_data, *popt)
+    plt.plot(x_data, y_data, 'o', color=color, label=f'{label_prefix} Data', markersize=5)
+    plt.plot(x_data, fitted_y, '-', color=color, label=f'Fit: {label_prefix}')
+
+
+# Function to calculate the contact point, now including fitobj creation
+def contact_point(popt, t, dt=1):
+    # Create fitobj within this function using the optimized parameters
+    def fitobj(t):
+        return model_func(t, *popt)
+
+    # Generate a range of t values and corresponding y values of fitobj
+    t_values = np.linspace(0, t, num=int(t / dt) + 1)
+    y_values = np.array([fitobj(ti) for ti in t_values])
+
+    # Approximate the derivative using numpy.gradient
+    derivatives = np.gradient(y_values, t_values)
+
+    # Calculate the initial slope from t=0 to t=asymp_t
+    slp = (fitobj(t) - fitobj(0)) / t
+
+    # Find the index where the derivative of the curve is closest to the initial slope
+    min_index = np.argmin(np.abs(derivatives - slp))
+    contact_t = t_values[min_index]
+
+    return contact_t
+
+
+# Main function to compute stable period and fit curves
+def compute_stable_period(run_data, last_n=10):
+    # Initialize arrays
+    bc = np.array([])
+    tc = np.array([])
+
+    # Extract data from the last_n episodes
+    for ep in run_data.episode_buffer[-last_n:]:
+        choices, sec_steps, transitions, outcomes, choice_idx, _, _ = _get_CSTO(ep, return_inds=True)
+        positive = ep.task_rew_states[choice_idx]
+        better = (choices == positive)
+        t = ep.trial_idx_within_block[choice_idx]
+        bc = np.concatenate((bc, better))
+        tc = np.concatenate((tc, t))
+
+    # Compute stay decisions
+    stay = (bc[1:] == bc[:-1])
+    positive_stay = stay & (bc[1:] == 1)
+    negative_stay = stay & (bc[1:] == 0)
+    trial_index = tc[1:]
+
+    # Calculate proportions
+    pd_positive_stay = pd.DataFrame({'x': trial_index, 'y': positive_stay})
+    pd_negative_stay = pd.DataFrame({'x': trial_index, 'y': negative_stay})
+    prop_positive_stay = pd_positive_stay.groupby('x')['y'].mean()
+    prop_negative_stay = pd_negative_stay.groupby('x')['y'].mean()
+
+    # Calculate asymptotic trial index
+    block_lengths = [trial_index[i - 1] for i in range(1, len(trial_index)) if trial_index[i] == 0]
+    asymp_t = round(np.percentile(block_lengths, 95))
+
+    # Filter data based on asymp_t
+    filtered_prop_positive_stay = prop_positive_stay[
+        (prop_positive_stay.index >= 1) & (prop_positive_stay.index <= asymp_t)]
+    filtered_prop_negative_stay = prop_negative_stay[
+        (prop_negative_stay.index >= 1) & (prop_negative_stay.index <= asymp_t)]
+
+    # Curve fitting parameters
+    initial_guesses_pos = [-1, 1, 0, 0]
+    parameter_bounds_pos = ([-np.inf, 0, -np.inf, -np.inf], [0, np.inf, np.inf, np.inf])
+    initial_guesses_neg = [1, 1, 0, 0]
+    parameter_bounds_neg = ([0, 0, -np.inf, -np.inf], [np.inf, np.inf, np.inf, np.inf])
+
+    # Fit curves
+    popt_pos = fit_curve(filtered_prop_positive_stay.index.values - 1, filtered_prop_positive_stay.values,
+                         initial_guesses_pos, parameter_bounds_pos)
+    popt_neg = fit_curve(filtered_prop_negative_stay.index.values - 1, filtered_prop_negative_stay.values,
+                         initial_guesses_neg, parameter_bounds_neg)
+
+    contact_point_pos = contact_point(popt_pos,asymp_t)
+    contact_point_neg = contact_point(popt_neg,asymp_t)
+
+    sfc = round((contact_point_pos+contact_point_neg)/2)
+
+    # Evaluate model_func for both fn and fp over the range from 0 to sfc
+    t_values = np.arange(0, sfc)  # +1 to include sfc
+    fn_values = model_func(t_values, *popt_neg)
+    fp_values = model_func(t_values, *popt_pos)
+
+    # Find the index where the absolute difference between fn_values and fp_values is minimized
+    mfc = np.argmin(np.abs(fn_values - fp_values))
+
+    # Adjust mfc to ensure it is not less than 1, considering Python's zero-based indexing
+    mfc = max(mfc, 1)
+    fp = fp_values[-1]
+    fn = fn_values[-1]
+
+    # Updated plotting section with specified colors
+    plt.figure(figsize=(10, 6))
+    plot_data_and_fit(filtered_prop_positive_stay.index.values - 1, filtered_prop_positive_stay.values, popt_pos,
+                      'Positive Stay', 'blue')
+    plot_data_and_fit(filtered_prop_negative_stay.index.values - 1, filtered_prop_negative_stay.values, popt_neg,
+                      'Negative Stay', 'red')
+    plt.xlabel('Trial Index')
+    plt.ylabel('Proportion of Stay')
+    plt.title('Curve Fitting to Proportion of Stay Decisions')
+    plt.legend()
+    plt.show()
+
+    contact_point_pos
+
+
+def compute_stable_period2(run_data, last_n=10):
+    vbc = np.array([])
+    vtc = np.array([])
+
+    for ep in run_data.episode_buffer[-last_n:]:
+        positive = 4-ep.task_rew_states
+        better = (ep.actions == positive)
+        at_choice = (ep.states == choice)
+
+        action_at_choice = ep.actions[at_choice]
+        t_at_choice = ep.trial_idx_within_block[at_choice]
+        better_at_choice = better[at_choice]
+
+        valid_action_at_choice = (action_at_choice == choose_A) | (action_at_choice == choose_B)
+        valid_t_at_choice = t_at_choice[valid_action_at_choice]
+        valid_better_at_choice = better_at_choice[valid_action_at_choice]
+
+        vbc = np.concatenate((vbc,valid_better_at_choice))
+        vtc = np.concatenate((vtc,valid_t_at_choice))
+
+    stay = (vbc[1:]==vbc[:-1])
+    positive_stay = stay & (vbc[1:]==1)
+    negative_stay = stay & (vbc[1:]==0)
+    trial_index = vtc[1:]
+
+    pd_positive_stay = pd.DataFrame({'x': trial_index, 'y': positive_stay})
+    pd_negative_stay = pd.DataFrame({'x': trial_index, 'y': negative_stay})
+    prop_positive_stay = pd_positive_stay.groupby('x')['y'].mean()
+    prop_negative_stay = pd_negative_stay.groupby('x')['y'].mean()
+
+    prop_positive_stay
+
 #%% Plot experiment
     
 def plot_experiment(experiment_data, last_n=10, save_dir=None):
@@ -73,7 +296,8 @@ def plot_experiment(experiment_data, last_n=10, save_dir=None):
     if save_dir and not os.path.exists(save_dir):
         os.mkdir(save_dir)
         with open(os.path.join(save_dir,'params.txt'), 'w') as f:
-            json.dump(experiment_data[0].params, f, indent=4)    
+            json.dump(experiment_data[0].params, f, indent=4)
+
     stay_probability_analysis(experiment_data, last_n, fig_no=1, save_dir=save_dir)
     second_step_value_update_analysis(experiment_data, last_n, fig_no=2, save_dir=save_dir)
     plot_PFC_choice_state_activity(experiment_data, fig_no=3, save_dir=save_dir)

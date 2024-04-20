@@ -11,27 +11,29 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from collections import namedtuple
-
-import two_step_task as ts
+from tqdm import tqdm
+import two_step_task_miller as ts
 import analysis as an
 
 one_hot = keras.utils.to_categorical
 sse_loss = keras.losses.MeanSquaredError(reduction=tf.keras.losses.Reduction.SUM)
 
-Episode = namedtuple('Episode', ['states', 'rewards', 'actions', 'pfc_inputs', 'pfc_states', 'pred_states','task_rew_states', 'n_trials'])
+Episode = namedtuple('Episode', ['states', 'rewards', 'actions', 'pfc_inputs', 'pfc_states', 'pred_states','task_rew_states',
+                                 'trial_idx', 'block_idx', 'trial_idx_within_block', 'n_trials'])
 
 #%% Parameters.
 
 default_params = {
     # Simulation params.
-    'n_episodes'  : 500,
-    'episode_len' : 100,  # Episode length in trials.
-    'max_step_per_episode' : 600,
+    'n_train_episodes'  : 500,
+    'episode_len' : 200,  # Episode length in trials.
+    'max_step_per_episode' : 1200,
+    'n_test_trials' : 100000,
     'gamma' : 0.9,        # Discount rate
 
     #Task params.
+    'common_prob' : 0.8,
     'good_prob' : 0.8,
-    'block_len' : [20,40],
 
     # PFC model params.
     'n_back': 30, # Length of history provided as input.
@@ -51,7 +53,7 @@ def run_simulation(save_dir=None, pm=default_params):
     np.random.seed(int.from_bytes(os.urandom(4), 'little'))
 
     #Instantiate task.
-    task = ts.Two_step(good_prob=pm['good_prob'], block_len=pm['block_len'])
+    task = ts.Two_step(common_prob=pm['common_prob'], good_prob=pm['good_prob'])
     
     # PFC model.
     
@@ -110,6 +112,10 @@ def run_simulation(save_dir=None, pm=default_params):
         pfc_states.append(pfc_s)
         values.append(V)
         task_rew_states.append(task.A_good)
+        trial_index.append(task.trial_n)
+        block_index.append(task.block_n)
+        trial_index_within_block.append(task.block_trial)
+
         
     # Run model.
     
@@ -119,7 +125,7 @@ def run_simulation(save_dir=None, pm=default_params):
     
     episode_buffer = []
     
-    for e in range(pm['n_episodes']):
+    for e in range(pm['n_train_episodes']):
         
         step_n = 0
         start_trial = task.trial_n
@@ -132,6 +138,9 @@ def run_simulation(save_dir=None, pm=default_params):
         pfc_states = []    # (1,n_pfc)
         values = []        # float
         task_rew_states = [] # bool
+        trial_index = []
+        block_index = []
+        trial_index_within_block = []
            
         while True:
             step_n += 1
@@ -159,7 +168,8 @@ def run_simulation(save_dir=None, pm=default_params):
         
         pred_states = np.argmax(PFC_model(get_masked_PFC_inputs(pfc_inputs)),1) # Used only for analysis.
         episode_buffer.append(Episode(np.array(states), np.array(rewards), np.array(actions), np.array(pfc_inputs),
-                               np.vstack(pfc_states), np.array(pred_states), np.array(task_rew_states), n_trials))
+                               np.vstack(pfc_states), np.array(pred_states), np.array(task_rew_states),
+                               np.array(trial_index), np.array(block_index), np.array(trial_index_within_block), n_trials))
         
         # Update striatum weights using advantage actor critic (A2C), Mnih et al. PMLR 48:1928-1937, 2016
         
@@ -208,6 +218,69 @@ def run_simulation(save_dir=None, pm=default_params):
         # Save models with custom objects (if any) properly referenced.
         PFC_model.save(os.path.join(save_dir, 'PFC_model.h5'))
         Str_model.save(os.path.join(save_dir, 'Str_model.h5'))
+
+    # Run model.
+    s = task.reset()  # Get initial state as integer.
+    r = 0
+    pfc_s = Get_pfc_state(pfc_input_buffer[np.newaxis, :, :])
+
+    episode_buffer = []
+    start_trial = task.trial_n
+    pbar = tqdm(total=pm['n_test_trials'], position=0, leave=True)
+
+    # Episode history variables
+    states = []  # int
+    rewards = []  # float
+    actions = []  # int
+    pfc_inputs = []  # (1,30,n_states+n_actions)
+    pfc_states = []  # (1,n_pfc)
+    values = []  # float
+    task_rew_states = []  # bool
+    trial_index = []
+    block_index = []
+    trial_index_within_block = []
+
+    while True:
+        # Choose action.
+        action_probs, V = Str_model([one_hot(s, task.n_states)[None, :], pfc_s])
+        a = np.random.choice(task.n_actions, p=np.squeeze(action_probs))
+
+        # Store history.
+        store_trial_data(s, r, a, pfc_s, V)
+
+        # Get next state and reward.
+        s, r = task.step(a)
+
+        # Get new pfc state.
+        update_pfc_input(a, s, r)
+        # pfc_s = Get_pfc_state(pfc_input_buffer[np.newaxis,:,:])                # Get the PFC activity, slow but does not give error message.
+        pfc_s = Get_pfc_state.predict_on_batch(pfc_input_buffer[np.newaxis, :,
+                                               :])  # Get the PFC activity, fast and returns same result but gives an error message.
+
+        n_trials = task.trial_n - start_trial
+        pbar.update(n_trials - pbar.n)
+        if s == 0:
+            if n_trials >= pm['n_test_trials']:
+                break  # End of episode.
+
+    pbar.close()
+
+    # Store episode data.
+    pred_states = np.argmax(PFC_model(get_masked_PFC_inputs(pfc_inputs)), 1)  # Used only for analysis.
+    episode_buffer.append(Episode(np.array(states), np.array(rewards), np.array(actions), np.array(pfc_inputs),
+                                  np.vstack(pfc_states), np.array(pred_states), np.array(task_rew_states),
+                                  np.array(trial_index), np.array(block_index), np.array(trial_index_within_block),
+                                  n_trials))
+
+    # Save data.
+    test_dir = os.path.join(save_dir,'test')
+    if test_dir:
+        if not os.path.exists(os.path.join(test_dir)):
+            os.mkdir(test_dir)
+        with open(os.path.join(test_dir, 'params.json'), 'w') as fp:
+            json.dump(pm, fp, indent=4)
+        with open(os.path.join(test_dir, 'episodes.pkl'), 'wb') as fe:
+            pickle.dump(episode_buffer, fe)
 
     # if save_dir:
     #     if not os.path.exists(save_dir):
